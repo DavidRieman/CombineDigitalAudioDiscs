@@ -1,16 +1,19 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Text.RegularExpressions;
+using TagLibFile = TagLib.File;
 
 namespace CombineDigitalAudioDiscs
 {
     public class Program
     {
+        private static string dir;
+
         static void Main(string[] args)
         {
             Console.WriteLine("Starting...");
-            string dir = args.Length > 0 ? args[0] : string.Empty;
+            dir = args.Length > 0 ? args[0] : string.Empty;
             if (string.IsNullOrWhiteSpace(dir))
             {
                 Console.WriteLine("No path argument was given; What directory are we fixing Track numbers for?");
@@ -23,58 +26,99 @@ namespace CombineDigitalAudioDiscs
                 return;
             }
 
-            var files = Directory.GetFiles(dir, "*.wma");
-            if (files.Length == 0)
+            var files = FindFiles();
+            if (!files.Any())
             {
-                Console.WriteLine("Did not find any WMA files in that directory. Aborting.");
+                Console.WriteLine("Did not find any WMA or M4A files in that directory. Aborting.");
                 return;
             }
-            Console.WriteLine($"Found {files.Length} applicable files. Processing...");
+            Console.WriteLine($"Found {files.Count()} applicable files. Processing...");
 
-            var tagFiles = (from file in files
-                            let tag = TagLib.File.Create(file)
-                            orderby tag.Tag.Title ascending
-                            select tag).ToList();
-            Console.WriteLine($"Prepared tags for {tagFiles.Count} files. Check the order:");
-            Console.WriteLine($"{"FILE NAME",-45} = #   = TITLE TAG");
-            tagFiles.ForEach(tagFile =>
+            // First fix any File Name issues, so we can query the new files list and save to the right place when done with the Tags fixes.
+            if (Fixers.FixFileNameBasicReplacements(files))
             {
-                var fileName = Path.GetFileNameWithoutExtension(tagFile.Name);
-                Console.WriteLine($"{fileName,-45} = {tagFile.Tag.Track,-3} = {tagFile.Tag.Title}");
-            });
+                files = FindFiles();
+            }
 
-            Console.WriteLine($"Check that the ORDER of them is correct. Rewrite Track numbers as 1 through {tagFiles.Count}? [y/N]");
+            if (Fixers.FixFileNamesWithExtraNumbersBeforeChapters(files))
+            {
+                files = FindFiles();
+            }
+
+            var tagFiles = BuildTagFileList(files);
+            Console.WriteLine($"Prepared tags for {tagFiles.Count} files.");
+            Console.WriteLine("Checking for fixes that can be automatically applied.");
+            Console.WriteLine("(No changes will be saved until the end, after a final confirmation prompt.)");
+            bool haveChanges = false;
+
+            Console.WriteLine();
+            haveChanges = Fixers.FixDiskMarkersOnAlbumNames(tagFiles) || haveChanges;
+
+            Console.WriteLine();
+            haveChanges = Fixers.FixTitlesStartingWithNumbers(tagFiles) || haveChanges;
+
+            Console.WriteLine();
+            haveChanges = Fixers.FixTitlesStartingWithCh(tagFiles) || haveChanges;
+
+            Console.WriteLine();
+            haveChanges = Fixers.FixTitlesWithSingleDigitChapters(tagFiles) || haveChanges;
+
+            Console.WriteLine();
+            haveChanges = Fixers.FixTrackNumbers(tagFiles) || haveChanges;
+
+            if (!haveChanges)
+            {
+                Console.WriteLine();
+                Console.WriteLine("No changes were accepted. Done.");
+                return;
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("Done applying fixes. Save all the chosen changes? [y/N]");
             if (Console.ReadKey().Key != ConsoleKey.Y)
             {
-                Console.WriteLine("Aborting.");
+                Console.WriteLine("No changes will be saved to the files. Done.");
                 return;
             }
 
-            Regex findDiscMarker = new Regex("\\[Disc \\d+\\]|\\(Disce \\d+\\)");
-            var anyAlbumContainsDiscNumber = (from tagFile in tagFiles
-                                              let album = tagFile.Tag.Album
-                                              where findDiscMarker.IsMatch(album)
-                                              select album).Any();
-            bool removeDiscMarkers = false;
-            if (anyAlbumContainsDiscNumber)
-            {
-                Console.WriteLine("At least one Album name may contain [Disc ##] markers. Remove these?");
-                removeDiscMarkers = Console.ReadKey().Key == ConsoleKey.Y;
-            }
+            Console.WriteLine();
+            SaveChanges(tagFiles);
+        }
 
-            Console.WriteLine("Processing and rewriting:");
-            uint i = 1;
+        private static void SaveChanges(List<TagLibFile> tagFiles)
+        {
+            Console.Write("Rewriting");
             tagFiles.ForEach(tagFile =>
             {
-                tagFile.Tag.Track = i;
-                if (removeDiscMarkers)
-                    tagFile.Tag.Album = findDiscMarker.Replace(tagFile.Tag.Album, string.Empty).Trim();
                 tagFile.Save();
-                i++;
                 Console.Write(".");
             });
             Console.WriteLine();
             Console.WriteLine("Done!");
+        }
+
+        private static List<TagLibFile> BuildTagFileList(IEnumerable<string> files)
+        {
+            return (from file in files
+                    let tag = TagLibFile.Create(file)
+                    orderby tag.Tag.Title ascending
+                    select tag).ToList();
+        }
+
+        private static IEnumerable<string> GetFilesByExtensions(params string[] extensions)
+        {
+            foreach (var extension in extensions)
+            {
+                foreach (var file in Directory.GetFiles(dir, extension))
+                {
+                    yield return file;
+                }
+            }
+        }
+
+        private static IEnumerable<string> FindFiles()
+        {
+            return GetFilesByExtensions("*.wma", "*.m4a");
         }
     }
 }
